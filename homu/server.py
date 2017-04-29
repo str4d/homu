@@ -440,13 +440,24 @@ def buildbot():
 
     response.content_type = 'text/plain'
 
-    for row in json.loads(request.forms.packets):
-        if row['event'] == 'buildFinished':
-            info = row['payload']['build']
-            lazy_debug(logger, lambda: 'info: {}'.format(info))
-            props = dict(x[:2] for x in info['properties'])
+    bb09 = request.json != None
 
-            if 'retry' in info['text']: continue
+    packets = [request.json] if bb09 else request.forms.packets
+
+    for row in json.loads(packets):
+        if bb09:
+            # Buildbot 0.9+ does not have events, only a complete flag depending
+            # on whether this was triggered by buildStarted or buildFinished
+            event = 'buildFinished' if row['complete'] else 'buildStarted'
+        else:
+            event = row['event']
+        if event == 'buildFinished':
+            info = row if bb09 else row['payload']['build']
+            lazy_debug(logger, lambda: 'info: {}'.format({k: v for k, v in info.items() if k != 'secret'}))
+            props = {k: v[0] for k, v in info['properties'].items()} if bb09 else dict(x[:2] for x in info['properties'])
+
+            if 'retry' in info['state_string' if bb09 else 'text']:
+                continue
 
             if not props['revision']: continue
 
@@ -458,25 +469,28 @@ def buildbot():
 
             lazy_debug(logger, lambda: 'state: {}, {}'.format(state, state.build_res_summary()))
 
-            if info['builderName'] not in state.build_res:
+            builder_name = info['builder']['name'] if bb09 else info['builderName']
+            if builder_name not in state.build_res:
                 lazy_debug(logger,
-                           lambda: 'Invalid builder from Buildbot: {}'.format(info['builderName']))
+                           lambda: 'Invalid builder from Buildbot: {}'.format(builder_name))  # noqa
                 continue
 
             repo_cfg = g.repo_cfgs[repo_label]
 
-            if request.forms.secret != repo_cfg['buildbot']['secret']:
+            secret = info['secret'] if bb09 else request.forms.secret
+            if secret != repo_cfg['buildbot']['secret']:
                 abort(400, 'Invalid secret')
 
-            build_succ = 'successful' in info['text'] or info['results'] == 0
+            build_succ = 'successful' in info['state_string' if bb09 else 'text'] or info['results'] == 0
 
-            url = '{}/builders/{}/builds/{}'.format(
+            url = '{}{}/builders/{}/builds/{}'.format(
                 repo_cfg['buildbot']['url'],
-                info['builderName'],
+                '#' if bb09 else '',
+                info['builderid'] if bb09 else builder_name,
                 props['buildnumber'],
             )
 
-            if 'interrupted' in info['text']:
+            if 'interrupted' in info['state_string' if bb09 else 'text']:
                 step_name = ''
                 for step in reversed(info['steps']):
                     if 'interrupted' in step.get('text', []):
@@ -484,12 +498,21 @@ def buildbot():
                         break
 
                 if step_name:
-                    res = requests.get('{}/builders/{}/builds/{}/steps/{}/logs/interrupt'.format(
-                        repo_cfg['buildbot']['url'],
-                        info['builderName'],
-                        props['buildnumber'],
-                        step_name,
-                    ))
+                    try:
+                        url = ('{}{}/builders/{}/builds/{}/steps/{}/logs/interrupt'  # noqa
+                               ).format(repo_cfg['buildbot']['url'],
+                                        '#' if bb09 else '',
+                                        info['builderid'] if bb09 else builder_name,
+                                        props['buildnumber'],
+                                        step_name,)
+                        res = requests.get(url)
+                    except Exception as ex:
+                        logger.warn('/buildbot encountered an error during '
+                                    'github logs request')
+                        # probably related to
+                        # https://gitlab.com/pycqa/flake8/issues/42
+                        lazy_debug(logger, lambda: 'buildbot logs err: {}'.format(ex))  # noqa
+                        abort(502, 'Bad Gateway')
 
                     mat = INTERRUPTED_BY_HOMU_RE.search(res.text)
                     if mat:
@@ -511,31 +534,35 @@ def buildbot():
                 else:
                     logger.error('Corrupt payload from Buildbot')
 
-            report_build_res(build_succ, url, info['builderName'], state, logger, repo_cfg)
+            report_build_res(build_succ, url, builder_name,
+                             state, logger, repo_cfg)
 
-        elif row['event'] == 'buildStarted':
-            info = row['payload']['build']
-            lazy_debug(logger, lambda: 'info: {}'.format(info))
-            props = dict(x[:2] for x in info['properties'])
+        elif event == 'buildStarted':
+            info = row if bb09 else row['payload']['build']
+            lazy_debug(logger, lambda: 'info: {}'.format({k: v for k, v in info.items() if k != 'secret'}))
+            props = {k: v[0] for k, v in info['properties'].items()} if bb09 else dict(x[:2] for x in info['properties'])
 
             if not props['revision']: continue
 
             try: state, repo_label = find_state(props['revision'])
             except ValueError: pass
             else:
-                if info['builderName'] in state.build_res:
+                builder_name = info['builder']['name'] if bb09 else info['builderName']
+                if builder_name in state.build_res:
                     repo_cfg = g.repo_cfgs[repo_label]
 
-                    if request.forms.secret != repo_cfg['buildbot']['secret']:
+                    secret = info['secret'] if bb09 else request.forms.secret
+                    if secret != repo_cfg['buildbot']['secret']:
                         abort(400, 'Invalid secret')
 
-                    url = '{}/builders/{}/builds/{}'.format(
+                    url = '{}{}/builders/{}/builds/{}'.format(
                         repo_cfg['buildbot']['url'],
-                        info['builderName'],
+                        '#' if bb09 else '',
+                        info['builderid'] if bb09 else builder_name,
                         props['buildnumber'],
                     )
 
-                    state.set_build_res(info['builderName'], None, url)
+                    state.set_build_res(builder_name, None, url)
 
             if g.buildbot_slots[0] == props['revision']:
                 g.buildbot_slots[0] = ''

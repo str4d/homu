@@ -96,7 +96,26 @@ pip install -e homu
 
 4. Add a Webhook to your continuous integration service:
 
- - Buildbot
+ - Buildbot 0.9 and later
+
+   Insert the following code to the `master.cfg` file:
+
+    ```python
+    from buildbot.status.status_push import HttpStatusPush
+
+    def homuStatusUpdate(build):
+        build['secret'] = 'repo.NAME.buildbot.secret in cfg.toml'
+        return build
+
+    c['services'].append(HttpStatusPush(
+        serverUrl='http://HOST:PORT/buildbot',
+        format_fn=homuStatusUpdate,
+        wantProperties=True,
+        wantSteps=True,
+    ))
+    ```
+
+ - Buildbot before 0.9
 
    Insert the following code to the `master.cfg` file:
 
