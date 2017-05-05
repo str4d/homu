@@ -1,4 +1,5 @@
 from contextlib import contextmanager
+import json
 import re
 import requests
 import time
@@ -65,3 +66,60 @@ def buildbot_rebuild(sess, builder, url):
         err = mat.group(1) if mat else 'Unknown error'
 
     return err
+
+
+class BuildbotBuilderStep:
+    def __init__(self, step):
+        self.name = step['name']
+        self.text = step.get('text', [])
+
+class BuildbotStatusPacket:
+    def __init__(self, packet):
+        self.event = packet['event']
+        self._info = packet['payload']['build']
+
+        self.builder_name = self._info['builderName']
+        self.properties = dict(x[:2] for x in self._info['properties'])
+        self.results = self._info['results']
+        self.steps = [BuildbotBuilderStep(s) for s in self._info['steps']]
+        self.text = self._info['text']
+
+    def url(self, repo_cfg):
+        return '{}/builders/{}/builds/{}'.format(
+            repo_cfg['buildbot']['url'],
+            self.builder_name,
+            self.properties['buildnumber'],
+        )
+
+    def interrupted(self):
+        return 'interrupted' in self.text
+
+    def interrupt_reason(self, repo_cfg):
+        step_name = ''
+        for step in reversed(self.steps):
+            if 'interrupted' in step.text:
+                step_name = step.name
+                break
+
+        if step_name:
+            url = (
+                '{}/builders/{}/builds/{}/steps/{}/logs/interrupt'  # noqa
+            ).format(
+                repo_cfg['buildbot']['url'],
+                self.builder_name,
+                self.properties['buildnumber'],
+                step_name,
+            )
+            res = requests.get(url)
+            return res.text
+        else:
+            return None
+
+    def __repr__(self):
+        return self._info.__repr__()
+
+
+class BuildbotStatus:
+    def __init__(self, request):
+        self.packets = [BuildbotStatusPacket(p) for p in json.loads(request.forms.packets)]
+        self.secret = request.forms.secret

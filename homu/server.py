@@ -8,6 +8,7 @@ from .main import (
     synchronize,
 )
 from .buildbot import (
+    BuildbotStatus,
     INTERRUPTED_BY_HOMU_RE,
 )
 from . import utils
@@ -553,13 +554,14 @@ def buildbot():
 
     response.content_type = 'text/plain'
 
-    for row in json.loads(request.forms.packets):
-        if row['event'] == 'buildFinished':
-            info = row['payload']['build']
-            lazy_debug(logger, lambda: 'info: {}'.format(info))
-            props = dict(x[:2] for x in info['properties'])
+    status = BuildbotStatus(request)
 
-            if 'retry' in info['text']:
+    for packet in status.packets:
+        if packet.event == 'buildFinished':
+            lazy_debug(logger, lambda: 'info: {}'.format(packet))
+            props = packet.properties
+
+            if 'retry' in packet.text:
                 continue
 
             if not props['revision']:
@@ -574,80 +576,61 @@ def buildbot():
 
             lazy_debug(logger, lambda: 'state: {}, {}'.format(state, state.build_res_summary()))  # noqa
 
-            if info['builderName'] not in state.build_res:
+            if packet.builder_name not in state.build_res:
                 lazy_debug(logger,
-                           lambda: 'Invalid builder from Buildbot: {}'.format(info['builderName']))  # noqa
+                           lambda: 'Invalid builder from Buildbot: {}'.format(packet.builder_name))  # noqa
                 continue
 
             repo_cfg = g.repo_cfgs[repo_label]
 
-            if request.forms.secret != repo_cfg['buildbot']['secret']:
+            if status.secret != repo_cfg['buildbot']['secret']:
                 abort(400, 'Invalid secret')
 
-            build_succ = 'successful' in info['text'] or info['results'] == 0
+            build_succ = 'successful' in packet.text or packet.results == 0
 
-            url = '{}/builders/{}/builds/{}'.format(
-                repo_cfg['buildbot']['url'],
-                info['builderName'],
-                props['buildnumber'],
-            )
+            url = packet.url(repo_cfg)
 
-            if 'interrupted' in info['text']:
-                step_name = ''
-                for step in reversed(info['steps']):
-                    if 'interrupted' in step.get('text', []):
-                        step_name = step['name']
-                        break
+            if packet.interrupted():
+                try:
+                    mat = INTERRUPTED_BY_HOMU_RE.search(packet.interrupt_reason(repo_cfg))
+                except Exception as ex:
+                    logger.warn('/buildbot encountered an error during '
+                                'github logs request')
+                    # probably related to
+                    # https://gitlab.com/pycqa/flake8/issues/42
+                    lazy_debug(logger, lambda: 'buildbot logs err: {}'.format(ex))  # noqa
+                    abort(502, 'Bad Gateway')
+                if mat:
+                    interrupt_token = mat.group(1)
+                    if getattr(state, 'interrupt_token',
+                               '') != interrupt_token:
+                        state.interrupt_token = interrupt_token
 
-                if step_name:
-                    try:
-                        url = ('{}/builders/{}/builds/{}/steps/{}/logs/interrupt'  # noqa
-                               ).format(repo_cfg['buildbot']['url'],
-                                        info['builderName'],
-                                        props['buildnumber'],
-                                        step_name,)
-                        res = requests.get(url)
-                    except Exception as ex:
-                        logger.warn('/buildbot encountered an error during '
-                                    'github logs request')
-                        # probably related to
-                        # https://gitlab.com/pycqa/flake8/issues/42
-                        lazy_debug(logger, lambda: 'buildbot logs err: {}'.format(ex))  # noqa
-                        abort(502, 'Bad Gateway')
+                        if state.status == 'pending':
+                            state.set_status('')
 
-                    mat = INTERRUPTED_BY_HOMU_RE.search(res.text)
-                    if mat:
-                        interrupt_token = mat.group(1)
-                        if getattr(state, 'interrupt_token',
-                                   '') != interrupt_token:
-                            state.interrupt_token = interrupt_token
+                            desc = (':snowman: The build was interrupted '
+                                    'to prioritize another pull request.')
+                            state.add_comment(desc)
+                            utils.github_create_status(state.get_repo(),
+                                                       state.head_sha,
+                                                       'error', url,
+                                                       desc,
+                                                       context='homu')
 
-                            if state.status == 'pending':
-                                state.set_status('')
+                            g.queue_handler()
 
-                                desc = (':snowman: The build was interrupted '
-                                        'to prioritize another pull request.')
-                                state.add_comment(desc)
-                                utils.github_create_status(state.get_repo(),
-                                                           state.head_sha,
-                                                           'error', url,
-                                                           desc,
-                                                           context='homu')
-
-                                g.queue_handler()
-
-                        continue
+                    continue
 
                 else:
                     logger.error('Corrupt payload from Buildbot')
 
-            report_build_res(build_succ, url, info['builderName'],
+            report_build_res(build_succ, url, packet.builder_name,
                              state, logger, repo_cfg)
 
-        elif row['event'] == 'buildStarted':
-            info = row['payload']['build']
-            lazy_debug(logger, lambda: 'info: {}'.format(info))
-            props = dict(x[:2] for x in info['properties'])
+        elif packet.event == 'buildStarted':
+            lazy_debug(logger, lambda: 'info: {}'.format(packet))
+            props = packet.properties
 
             if not props['revision']:
                 continue
@@ -657,19 +640,15 @@ def buildbot():
             except ValueError:
                 pass
             else:
-                if info['builderName'] in state.build_res:
+                if packet.builder_name in state.build_res:
                     repo_cfg = g.repo_cfgs[repo_label]
 
-                    if request.forms.secret != repo_cfg['buildbot']['secret']:
+                    if status.secret != repo_cfg['buildbot']['secret']:
                         abort(400, 'Invalid secret')
 
-                    url = '{}/builders/{}/builds/{}'.format(
-                        repo_cfg['buildbot']['url'],
-                        info['builderName'],
-                        props['buildnumber'],
-                    )
+                    url = packet.url(repo_cfg)
 
-                    state.set_build_res(info['builderName'], None, url)
+                    state.set_build_res(packet.builder_name, None, url)
 
             if g.buildbot_slots[0] == props['revision']:
                 g.buildbot_slots[0] = ''
