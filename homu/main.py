@@ -10,7 +10,6 @@ import time
 import traceback
 import sqlite3
 import requests
-from contextlib import contextmanager
 from itertools import chain
 from queue import Queue
 import os
@@ -18,6 +17,11 @@ import sys
 from enum import IntEnum
 import subprocess
 from .git_helper import SSH_KEY_FILE
+from .buildbot import (
+    buildbot_rebuild,
+    buildbot_sess,
+    buildbot_stopselected,
+)
 import shlex
 import random
 
@@ -30,28 +34,9 @@ STATUS_TO_PRIORITY = {
     'failure': 5,
 }
 
-INTERRUPTED_BY_HOMU_FMT = 'Interrupted by Homu ({})'
-INTERRUPTED_BY_HOMU_RE = re.compile(r'Interrupted by Homu \((.+?)\)')
 TEST_TIMEOUT = 3600 * 10
 
 global_cfg = {}
-
-
-@contextmanager
-def buildbot_sess(repo_cfg):
-    sess = requests.Session()
-
-    sess.post(
-        repo_cfg['buildbot']['url'] + '/login',
-        allow_redirects=False,
-        data={
-            'username': repo_cfg['buildbot']['username'],
-            'passwd': repo_cfg['buildbot']['password'],
-        })
-
-    yield sess
-
-    sess.get(repo_cfg['buildbot']['url'] + '/logout', allow_redirects=False)
 
 
 db_query_lock = Lock()
@@ -583,25 +568,7 @@ def parse_commands(body, username, repo_cfg, state, my_username, db, states,
             if not _try_auth_verified:
                 continue
             if 'buildbot' in repo_cfg:
-                with buildbot_sess(repo_cfg) as sess:
-                    res = sess.post(
-                        repo_cfg['buildbot']['url'] + '/builders/_selected/stopselected',   # noqa
-                        allow_redirects=False,
-                        data={
-                            'selected': repo_cfg['buildbot']['builders'],
-                            'comments': INTERRUPTED_BY_HOMU_FMT.format(int(time.time())),  # noqa
-                    })
-
-            if 'authzfail' in res.text:
-                err = 'Authorization failed'
-            else:
-                mat = re.search('(?s)<div class="error">(.*?)</div>', res.text)
-                if mat:
-                    err = mat.group(1).strip()
-                    if not err:
-                        err = 'Unknown error'
-                else:
-                    err = ''
+                err = buildbot_stopselected(repo_cfg)
 
             if err:
                 state.add_comment(
@@ -1169,19 +1136,7 @@ def start_rebuild(state, repo_cfgs):
 
     with buildbot_sess(repo_cfg) as sess:
         for builder, url in builders:
-            res = sess.post(url + '/rebuild', allow_redirects=False, data={
-                'useSourcestamp': 'exact',
-                'comments': 'Initiated by Homu',
-            })
-
-            if 'authzfail' in res.text:
-                err = 'Authorization failed'
-            elif builder in res.text:
-                err = ''
-            else:
-                mat = re.search('<title>(.+?)</title>', res.text)
-                err = mat.group(1) if mat else 'Unknown error'
-
+            err = buildbot_rebuild(sess, builder, url)
             if err:
                 state.add_comment(':bomb: Failed to start rebuilding: `{}`'.format(err))  # noqa
                 return False

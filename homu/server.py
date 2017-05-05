@@ -5,8 +5,10 @@ from .main import (
     PullReqState,
     parse_commands,
     db_query,
-    INTERRUPTED_BY_HOMU_RE,
     synchronize,
+)
+from .buildbot import (
+    INTERRUPTED_BY_HOMU_RE,
 )
 from . import utils
 from .utils import lazy_debug
