@@ -3,6 +3,7 @@ import github3
 import toml
 import json
 import re
+import functools
 from . import utils
 import logging
 from threading import Thread, Lock
@@ -368,7 +369,8 @@ def parse_commands(body, username, repo_cfg, state, my_username, db, states,
     global global_cfg
     state_changed = False
 
-    _reviewer_auth_verified = verify_auth(
+    _reviewer_auth_verified = functools.partial(
+        verify_auth,
         username,
         repo_cfg,
         state,
@@ -376,7 +378,8 @@ def parse_commands(body, username, repo_cfg, state, my_username, db, states,
         realtime,
         my_username,
     )
-    _try_auth_verified = verify_auth(
+    _try_auth_verified = functools.partial(
+        verify_auth,
         username,
         repo_cfg,
         state,
@@ -394,7 +397,7 @@ def parse_commands(body, username, repo_cfg, state, my_username, db, states,
     for i, word in reversed(list(enumerate(words))):
         found = True
         if word == 'r+' or word.startswith('r='):
-            if not _reviewer_auth_verified:
+            if not _reviewer_auth_verified():
                 continue
 
             if not sha and i + 1 < len(words):
@@ -524,13 +527,13 @@ def parse_commands(body, username, repo_cfg, state, my_username, db, states,
 
         elif word == 'delegate-':
             # TODO: why is this a TRY?
-            if not _try_auth_verified:
+            if not _try_auth_verified():
                 continue
             state.delegate = ''
             state.save()
 
         elif word == 'delegate+':
-            if not _reviewer_auth_verified:
+            if not _reviewer_auth_verified():
                 continue
 
             state.delegate = state.get_repo().pull_request(state.num).user.login  # noqa
@@ -543,12 +546,12 @@ def parse_commands(body, username, repo_cfg, state, my_username, db, states,
                 )
 
         elif word == 'retry' and realtime:
-            if not _try_auth_verified:
+            if not _try_auth_verified():
                 continue
             state.set_status('')
 
         elif word in ['try', 'try-'] and realtime:
-            if not _try_auth_verified:
+            if not _try_auth_verified():
                 continue
             state.try_ = word == 'try'
 
@@ -558,14 +561,14 @@ def parse_commands(body, username, repo_cfg, state, my_username, db, states,
             state.save()
 
         elif word in ['rollup', 'rollup-']:
-            if not _try_auth_verified:
+            if not _try_auth_verified():
                 continue
             state.rollup = word == 'rollup'
 
             state.save()
 
         elif word == 'force' and realtime:
-            if not _try_auth_verified:
+            if not _try_auth_verified():
                 continue
             if 'buildbot' in repo_cfg:
                 err = buildbot_stopselected(repo_cfg)
@@ -576,7 +579,7 @@ def parse_commands(body, username, repo_cfg, state, my_username, db, states,
                 )
 
         elif word == 'clean' and realtime:
-            if not _try_auth_verified:
+            if not _try_auth_verified():
                 continue
             state.merge_sha = ''
             state.init_build_res([])
@@ -585,7 +588,7 @@ def parse_commands(body, username, repo_cfg, state, my_username, db, states,
         elif (word == 'hello?' or word == 'ping') and realtime:
             state.add_comment(":sleepy: I'm awake I'm awake")
         elif word.startswith('treeclosed='):
-            if not _reviewer_auth_verified:
+            if not _reviewer_auth_verified():
                 continue
             try:
                 treeclosed = int(word[len('treeclosed='):])
@@ -594,7 +597,7 @@ def parse_commands(body, username, repo_cfg, state, my_username, db, states,
                 pass
             state.save()
         elif word == 'treeclosed-':
-            if not _reviewer_auth_verified:
+            if not _reviewer_auth_verified():
                 continue
             state.change_treeclosed(-1)
             state.save()
@@ -605,10 +608,10 @@ def parse_commands(body, username, repo_cfg, state, my_username, db, states,
                     continue
                 if word == hook or word.startswith('%s=' % hook):
                     if hook_cfg['access'] == "reviewer":
-                        if not _reviewer_auth_verified:
+                        if not _reviewer_auth_verified():
                             continue
                     else:
-                        if not _try_auth_verified:
+                        if not _try_auth_verified():
                             continue
                     extra_data = ""
                     if word.startswith('%s=' % hook):
